@@ -10,6 +10,9 @@ const ffmpegPath = require('ffmpeg-static');
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3880;
+const YTDLP_COOKIES_PATH = process.env.YTDLP_COOKIES_PATH;
+const YTDLP_PROXY_URL = process.env.YTDLP_PROXY_URL;
+const YTDLP_EXTRACTOR_ARGS = process.env.YTDLP_EXTRACTOR_ARGS;
 
 app.use(cors());
 app.use(express.json());
@@ -91,6 +94,45 @@ function makeTempFile(ext) {
   return path.join(os.tmpdir(), `yt-${Date.now()}-${randomUUID()}.${ext}`);
 }
 
+function getYtDlpBaseOptions() {
+  const options = {
+    noWarnings: true,
+    noCheckCertificates: true,
+  };
+
+  if (YTDLP_COOKIES_PATH) {
+    options.cookies = YTDLP_COOKIES_PATH;
+  }
+
+  if (YTDLP_PROXY_URL) {
+    options.proxy = YTDLP_PROXY_URL;
+  }
+
+  if (YTDLP_EXTRACTOR_ARGS) {
+    options.extractorArgs = YTDLP_EXTRACTOR_ARGS;
+  }
+
+  return options;
+}
+
+function getFriendlyYtDlpError(err) {
+  const raw = String(err?.message || err || '');
+
+  if (/sign in to confirm you(?:'|’)re not a bot/i.test(raw) || /\bHTTP Error 429\b/i.test(raw)) {
+    return 'YouTube is blocking this server right now. This is common on cloud hosts like Railway. To make production work, add fresh YouTube cookies or route requests through a trusted proxy/VPS.';
+  }
+
+  if (/video unavailable/i.test(raw)) {
+    return 'This video is unavailable or cannot be accessed from the server region.';
+  }
+
+  if (/unsupported url/i.test(raw)) {
+    return 'The provided URL is not supported.';
+  }
+
+  return 'Failed to fetch video info. Please check the URL and try again.';
+}
+
 function runYtDlpToFile(url, flags) {
   return new Promise((resolve, reject) => {
     const subprocess = youtubedl.exec(url, flags, { stdio: ['ignore', 'ignore', 'pipe'] });
@@ -149,8 +191,7 @@ app.post('/api/info', async (req, res) => {
   try {
     const info = await youtubedl(url, {
       dumpSingleJson: true,
-      noWarnings: true,
-      noCheckCertificates: true,
+      ...getYtDlpBaseOptions(),
     });
 
     const formats = Array.isArray(info.formats) ? info.formats : [];
@@ -165,7 +206,7 @@ app.post('/api/info', async (req, res) => {
     });
   } catch (err) {
     console.error('INFO_ERROR:', err.message || err);
-    res.status(500).json({ error: 'Failed to fetch video info. Please check the URL.' });
+    res.status(500).json({ error: getFriendlyYtDlpError(err) });
   }
 });
 
@@ -184,14 +225,13 @@ app.get('/api/download', async (req, res) => {
       const outFile = makeTempFile('mp3');
 
       await runYtDlpToFile(url, {
+        ...getYtDlpBaseOptions(),
         format: 'bestaudio/best',
         extractAudio: true,
         audioFormat: 'mp3',
         audioQuality: '0',
         ffmpegLocation: ffmpegPath,
         output: outFile,
-        noWarnings: true,
-        noCheckCertificates: true,
       });
 
       res.setHeader('Content-Disposition', `attachment; filename="${cleanTitle}.mp3"`);
@@ -208,12 +248,11 @@ app.get('/api/download', async (req, res) => {
 
     const outFile = makeTempFile('mp4');
     await runYtDlpToFile(url, {
+      ...getYtDlpBaseOptions(),
       format: `${selected}+bestaudio[ext=m4a]/${selected}+bestaudio/${selected}`,
       mergeOutputFormat: 'mp4',
       ffmpegLocation: ffmpegPath,
       output: outFile,
-      noWarnings: true,
-      noCheckCertificates: true,
     });
 
     res.setHeader('Content-Disposition', `attachment; filename="${cleanTitle}.mp4"`);
@@ -221,7 +260,7 @@ app.get('/api/download', async (req, res) => {
     await streamAndCleanup(outFile, res);
   } catch (err) {
     console.error('DOWNLOAD_ERROR:', err.message || err);
-    res.status(500).json({ error: 'Download failed. Please try another format.' });
+    res.status(500).json({ error: getFriendlyYtDlpError(err) });
   }
 });
 
